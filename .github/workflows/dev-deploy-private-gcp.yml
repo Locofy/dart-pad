@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - main
-      - build
 
 env:
   PROJECT_ID: lightning-dev-423309
