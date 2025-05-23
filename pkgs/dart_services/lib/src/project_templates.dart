@@ -75,6 +75,16 @@ const Set<String> supportedFlutterPackages = {
   'shared_preferences',
   'url_launcher',
   'video_player',
+  'share_plus',
+  'remote_fonts',
+  'lottie',
+  'chewie',
+  'media_kit',
+  'media_kit_video',
+  'media_kit_libs_video',
+  'media_kit_libs_audio',
+  'fvp',
+  'patch_package',
 };
 
 /// The set of packages which indicate that Flutter Web is being used.

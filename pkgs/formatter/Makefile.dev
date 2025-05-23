@@ -1,0 +1,11 @@
+.PHONY: build
+
+BUILD_DIR := build
+SRC := lib/main.dart
+OUT := $(BUILD_DIR)/format.dev.js
+
+build:
+	@echo "🔧 Compiling Dart for development..."
+	dart compile js -o $(OUT) $(SRC)
+
+	@echo "✅ Dev build complete: $(OUT)"

@@ -1,0 +1,17 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flutter-server
+  namespace: flutter-server
+spec:
+  template:
+    spec:
+      containers:
+        - name: flutter-server
+          resources:
+            limits:
+              cpu: 8192m
+              memory: 12Gi
+            requests:
+              cpu: 4096m
+              memory: 6Gi

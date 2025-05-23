@@ -1,0 +1,12 @@
+diff -ruN /var/folders/f6/r6gbg5hx79v53gqvb_6j01rw0000gn/T/media_kit/lib/src/player/web/utils/hls.dart /home/flutter/.pub-cache/hosted/pub.dev/media_kit-1.1.11/lib/src/player/web/utils/hls.dart
+--- /var/folders/f6/r6gbg5hx79v53gqvb_6j01rw0000gn/T/media_kit/lib/src/player/web/utils/hls.dart	2025-03-12 13:02:08
++++ /home/flutter/.pub-cache/hosted/pub.dev/media_kit-1.1.11/lib/src/player/web/utils/hls.dart	2025-03-12 13:02:17
+@@ -65,7 +65,7 @@
+   }
+ 
+   static const String kHLSAsset =
+-      'assets/packages/media_kit/assets/web/hls1.4.10.js';
++      'https://static.locofy.ai/libs/flutter/hls1.4.10.js';
+   static const String kHLSCDN =
+       'https://cdnjs.cloudflare.com/ajax/libs/hls.js/1.4.10/hls.js';
+ 

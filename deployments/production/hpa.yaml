@@ -1,0 +1,17 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flutter-server
+  namespace: flutter-server
+spec:
+  replicas: 3
+---
+
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: flutter-server
+  namespace: flutter-server
+spec:
+  minReplicas: 3
+  maxReplicas: 6

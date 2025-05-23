@@ -1,0 +1,19 @@
+.PHONY: build
+
+VERSION ?= 1
+BUILD_DIR := build
+SRC := lib/main.dart
+OUT := $(BUILD_DIR)/format.v$(VERSION).raw.js
+FINAL := $(BUILD_DIR)/format.v$(VERSION).min.js
+
+build:
+	@echo "🚀 Compiling Dart to JS (v$(VERSION))..."
+	dart compile js -O2 --no-source-maps -o $(OUT) $(SRC)
+
+	@echo "🧼 Replacing window.location.href with static origin..."
+	sed -i.bak 's/self.location.href/"https:\/\/locofy.ai"/g' $(OUT)
+
+	@echo "🧹 Minifying with Terser..."
+	npx terser $(OUT) --compress --mangle --output $(FINAL)
+
+	@echo "✅ Build complete: $(FINAL)"

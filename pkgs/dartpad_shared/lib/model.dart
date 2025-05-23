@@ -569,3 +569,39 @@ enum Channel {
     return Channel.values.firstWhereOrNull((c) => c.name == name);
   }
 }
+
+@JsonSerializable()
+class BuildCodeRequest {
+  final String sourceFileUrl;
+  final String projectId;
+  final String pageId;
+  final String screenId;
+  final String? nodeId;
+
+  BuildCodeRequest(this.projectId,
+      this.pageId, this.screenId, this.nodeId, this.sourceFileUrl
+      );
+
+  factory BuildCodeRequest.fromJson(Map<String, Object?> json) =>
+      _$BuildCodeRequestFromJson(json);
+
+  Map<String, Object?> toJson() => _$BuildCodeRequestToJson(this);
+
+  @override
+  String toString() => 'BuildCodeRequest[projectID=$projectId,pageID=$pageId,screenID=$screenId,nodeID=$nodeId],sourceFileUrl=$sourceFileUrl';
+}
+
+@JsonSerializable()
+class BuildCodeResponse {
+  final String buildId;
+
+  BuildCodeResponse({required this.buildId});
+
+  factory BuildCodeResponse.fromJson(Map<String, Object?> json) =>
+      _$BuildCodeResponseFromJson(json);
+
+  Map<String, Object?> toJson() => _$BuildCodeResponseToJson(this);
+
+  @override
+  String toString() => 'BuildCodeResponse[buildId=$buildId]';
+}

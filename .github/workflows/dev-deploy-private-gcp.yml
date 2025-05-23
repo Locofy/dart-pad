@@ -1,0 +1,119 @@
+name: Build and Deploy to Private GKE DEV
+
+on:
+  push:
+    branches:
+      - main
+      - build
+
+env:
+  PROJECT_ID: lightning-dev-423309
+  GCR: asia-southeast1-docker.pkg.dev
+  IMAGE_REPOSITORY: lightning-dev-423309/development-registry-repo/flutter-server
+  BASE_IMAGE_REPOSITORY: lightning-dev-423309/development-registry-repo/flutter
+  GKE_CLUSTER: dev-gke
+  GKE_LOCATION: asia-southeast1
+  SERVICE_NAME: flutter-server
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  build-docker-image:
+    name: Build Docker Image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Source Code Checkout
+        uses: actions/checkout@v3
+        with:
+          submodules: recursive
+          token: ${{ secrets.ORG_GH_ACCESS_TOKEN }}
+
+      - name: Authenticate Google Cloud
+        uses: "google-github-actions/auth@v2"
+        with:
+          credentials_json: "${{ secrets.ORG_GKE_SA_KEY_DEV }}"
+
+      - uses: google-github-actions/setup-gcloud@v2
+        name: Set up gcloud CLI
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+
+      - name: Configure Docker to use the gcloud command-line tool as a credential
+        run: |
+          gcloud --quiet auth configure-docker $GCR
+
+      - name: Generate Short GIT Commit HASH
+        id: vars
+        run: echo "sha_short=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Build, tag, and push image to Google Artifact
+        id: build-image
+        env:
+          IMAGE_TAG: ${{ steps.vars.outputs.sha_short }}
+          GH_ACCESS_TOKEN: ${{ secrets.ORG_GH_ACCESS_TOKEN }}
+        run: |
+          docker build \
+            --build-arg GH_ACCESS_TOKEN=$GH_ACCESS_TOKEN \
+            --build-arg COMMIT_HASH=$IMAGE_TAG \
+            --build-arg BASE_IMAGE_REPOSITORY=$BASE_IMAGE_REPOSITORY \
+            --build-arg GCP_PROJECT_ID=$PROJECT_ID \
+            --build-arg FLUTTER_CHANNEL=stable \
+            -t $GCR/$IMAGE_REPOSITORY:$IMAGE_TAG \
+            -f docker/Dockerfile .
+          docker push $GCR/$IMAGE_REPOSITORY:$IMAGE_TAG
+          echo "IMAGE_URL=$GCR/$IMAGE_REPOSITORY:$IMAGE_TAG" >> "$GITHUB_ENV"
+
+  deploy-to-gke:
+    name: Deploy to Private GKE
+    runs-on: gke-cicd
+    needs: build-docker-image
+    steps:
+      - name: Source Code Checkout
+        uses: actions/checkout@v3
+        with:
+          submodules: recursive
+          token: ${{ secrets.ORG_GH_ACCESS_TOKEN }}
+
+      - name: Set up Kustomize
+        run: |
+          curl -s "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
+          chmod u+x ./kustomize
+          sudo mv ./kustomize /usr/local/bin/kustomize
+          
+      - name: Generate Short GIT Commit HASH
+        id: vars
+        run: echo "sha_short=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy to develop
+        env:
+          IMAGE_TAG: ${{ steps.vars.outputs.sha_short }}
+        run: |
+          cd ./deployments/develop
+          kustomize edit set image $SERVICE_NAME:latest=$GCR/$IMAGE_REPOSITORY:$IMAGE_TAG
+          kustomize build .
+          kustomize build . | kubectl apply -f -
+
+      - name: Bump version and push tag
+        if: github.ref == 'refs/heads/main'
+        id: semantic
+        uses: mathieudutour/github-tag-action@v6.1
+        with:
+          github_token: ${{ secrets.ORG_GH_ACCESS_TOKEN }}
+
+      - name: Create Release
+        if: github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v1
+        with:
+          token: ${{ secrets.ORG_GH_ACCESS_TOKEN }}
+          tag_name: ${{ steps.semantic.outputs.new_tag }}
+          draft: true
+          prerelease: true
+          generate_release_notes: true
+
+      - name: Cleanup
+        run: |
+          sudo rm -rf /tmp/*
+          rm -rf /_work
+          rm -rf /_diag

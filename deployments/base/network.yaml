@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: flutter-server
+  namespace: flutter-server
+  labels:
+    app.kubernetes.io/instance: flutter-server
+    app.kubernetes.io/name: flutter-server
+  annotations:
+    cloud.google.com/neg: '{"exposed_ports": {"80":{}}}'
+spec:
+  ports:
+    - name: http
+      protocol: TCP
+      port: 80
+      targetPort: 8080
+  selector:
+    app.kubernetes.io/instance: flutter-server
+    app.kubernetes.io/name: flutter-server
+  type: ClusterIP

@@ -406,3 +406,31 @@ Map<String, dynamic> _$AttachmentToJson(Attachment instance) =>
       'base64EncodedBytes': instance.base64EncodedBytes,
       'mimeType': instance.mimeType,
     };
+
+BuildCodeRequest _$BuildCodeRequestFromJson(Map<String, dynamic> json) =>
+    BuildCodeRequest(
+      json['projectId'] as String,
+      json['pageId'] as String,
+      json['screenId'] as String,
+      json['nodeId'] as String?,
+      json['sourceFileUrl'] as String,
+    );
+
+Map<String, dynamic> _$BuildCodeRequestToJson(BuildCodeRequest instance) =>
+    <String, dynamic>{
+      'sourceFileUrl': instance.sourceFileUrl,
+      'projectId': instance.projectId,
+      'pageId': instance.pageId,
+      'screenId': instance.screenId,
+      'nodeId': instance.nodeId,
+    };
+
+BuildCodeResponse _$BuildCodeResponseFromJson(Map<String, dynamic> json) =>
+    BuildCodeResponse(
+      buildId: json['buildId'] as String,
+    );
+
+Map<String, dynamic> _$BuildCodeResponseToJson(BuildCodeResponse instance) =>
+    <String, dynamic>{
+      'buildId': instance.buildId,
+    };

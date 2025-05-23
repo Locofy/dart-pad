@@ -11,6 +11,7 @@ import 'package:dartpad_shared/constants.dart';
 import 'package:dartpad_shared/services.dart';
 import 'package:logging/logging.dart';
 import 'package:meta/meta.dart';
+import 'package:sentry/sentry.dart';
 import 'package:shelf/shelf.dart';
 import 'package:shelf/shelf_io.dart' as shelf;
 import 'package:shelf_gzip/shelf_gzip.dart';
@@ -73,7 +74,15 @@ Future<void> main(List<String> args) async {
   Logger.root.level = Level.FINER;
   emitLogsToStdout();
 
-  final redisServerUri = results['redis-url'] as String?;
+  final String redisServerUri;
+  if (results.wasParsed('redis-url')) {
+    redisServerUri = results['redis-url'] as String;
+  } else if (Platform.environment.containsKey('REDIS_CONNECTION_URL')) {
+    redisServerUri = Platform.environment['REDIS_CONNECTION_URL']!;
+  } else {
+    redisServerUri = 'redis://localhost:6379';
+  }
+
   final storageBucket =
       results['storage-bucket'] as String? ?? 'nnbd_artifacts';
 
@@ -97,6 +106,21 @@ Starting dart-services:
     redisServerUri,
     storageBucket,
   );
+
+  // Sentry is used for error tracking.
+  final sentryDsn = Platform.environment['SENTRY_DSN'];
+  if (sentryDsn != null && sentryDsn.isNotEmpty) {
+    await Sentry.init((options) {
+      options.dsn = sentryDsn;
+      options.environment = Platform.environment['ENVIRONMENT'] ?? 'development';
+      // Set tracesSampleRate to 1.0 to capture 100% of transactions for performance monitoring.
+      // We recommend adjusting this value in production.
+      options.tracesSampleRate = 1.0;
+      options.compressPayload = true;
+    });
+  } else {
+    _logger.genericInfo('Sentry DSN not provided. Skipping Sentry initialization.');
+  }
 
   _logger.genericInfo('Listening on port ${server.port}');
 }

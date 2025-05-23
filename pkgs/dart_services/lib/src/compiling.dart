@@ -7,16 +7,27 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:bazel_worker/driver.dart';
+import 'package:dartpad_shared/model.dart';
+import 'package:googleapis/storage/v1.dart';
+import 'package:http/http.dart' as http;
+import 'package:logging/logging.dart';
 import 'package:path/path.dart' as path;
+import 'package:sentry/sentry.dart';
+import 'package:uuid/uuid.dart';
 
+import 'caching.dart';
 import 'common.dart';
+import 'common_server.dart';
 import 'context.dart';
-import 'logging.dart';
+import 'pkg/gcp_cdn_sevice.dart';
+import 'pkg/gcs_service.dart';
 import 'project_templates.dart';
 import 'pub.dart';
 import 'sdk.dart';
 
-final DartPadLogger _logger = DartPadLogger('compiler');
+final Logger _logger = Logger('compiler');
+
+final uuid = const Uuid();
 
 /// An interface to the dart2js compiler. A compiler object can process one
 /// compile at a time.
@@ -28,23 +39,52 @@ class Compiler {
 
   final ProjectTemplates _projectTemplates;
 
-  Compiler(Sdk sdk, {required String storageBucket})
-    : this._(sdk, path.join(sdk.dartSdkPath, 'bin', 'dart'), storageBucket);
+  final String _gcsCDNBucket =
+      Platform.environment['GCS_CDN_BUCKET'] ?? 'gcs-cdn-dev';
+  late final GCSService _gcsService;
+  late final GCDNService _gCDNService;
+  late final ServerCache _cache;
 
-  Compiler._(this._sdk, this._dartPath, this._storageBucket)
-    : _ddcDriver = BazelWorkerDriver(
-        () => Process.start(_dartPath, [
-          path.join(
-            _sdk.dartSdkPath,
-            'bin',
-            'snapshots',
-            'dartdevc.dart.snapshot',
-          ),
-          '--persistent_worker',
-        ]),
-        maxWorkers: 1,
-      ),
-      _projectTemplates = ProjectTemplates.instance;
+  static const flutterBuildResultDirectory = 'flutter-build';
+  static const flutterBuildCacheKeyTemplate = 'flutter-build:%s';
+  static final flutterBuildCacheExpiration = Duration(
+    seconds:
+        Platform.environment.containsKey(
+          'FLUTTER_BUILD_CACHE_EXPIRATION_IN_SECONDS',
+        )
+        ? int.parse(
+            Platform.environment['FLUTTER_BUILD_CACHE_EXPIRATION_IN_SECONDS']!,
+          )
+        : 86400, // default to 24 hours
+  );
+  static final flutterCDNBaseUrl =
+      Platform.environment['GCS_CDN_BASE_URL'] ??
+      'https://storage.googleapis.com/gcs-cdn-dev';
+  static final gCDNProjectId =
+      Platform.environment['GCS_CDN_PROJECT_ID'] ?? 'lightning-dev-423309';
+  static final gCDNURLMapName =
+      Platform.environment['GCS_CDN_URL_MAP_NAME'] ?? 'cdn-lb';
+
+  Compiler(
+      Sdk sdk, ServerCache cache, {
+        required String storageBucket,
+      }) : this._(sdk,
+      path.join(sdk.dartSdkPath, 'bin', 'dart'),
+      storageBucket,
+      GCSService(),
+      GCDNService(gCDNProjectId, gCDNURLMapName),
+      cache
+  );
+
+  Compiler._(this._sdk, this._dartPath, this._storageBucket, this._gcsService, this._gCDNService, this._cache)
+      : _ddcDriver = BazelWorkerDriver(
+          () => Process.start(_dartPath, [
+        path.join(_sdk.dartSdkPath, 'bin', 'snapshots',
+            'dartdevc.dart.snapshot'),
+        '--persistent_worker'
+      ]),
+      maxWorkers: 1),
+        _projectTemplates = ProjectTemplates.instance;
 
   /// Compile the given string and return the resulting [CompilationResults].
   Future<CompilationResults> compile(
@@ -152,8 +192,9 @@ class Compiler {
         // All hot restart (or initial compile) requests should include the
         // bootstrap library.
         final bootstrapPath = path.join(temp.path, 'lib', kBootstrapDart);
-        final bootstrapContents =
-            usingFlutter ? kBootstrapFlutterCode : kBootstrapDartCode;
+        final bootstrapContents = usingFlutter
+            ? kBootstrapFlutterCode
+            : kBootstrapDartCode;
 
         File(bootstrapPath).writeAsStringSync(bootstrapContents);
         compilePath = bootstrapPath;
@@ -234,8 +275,9 @@ class Compiler {
 
         final results = DDCCompilationResults(
           compiledJS: compiledJs,
-          deltaDill:
-              useNew ? base64Encode(newDeltaDill.readAsBytesSync()) : null,
+          deltaDill: useNew
+              ? base64Encode(newDeltaDill.readAsBytesSync())
+              : null,
           modulesBaseUrl:
               'https://storage.googleapis.com/$_storageBucket'
               '/${_sdk.dartVersion}/',
@@ -273,6 +315,285 @@ class Compiler {
     return await _compileDDC(source, ctx, deltaDill: deltaDill, useNew: true);
   }
 
+  /// Compile the given string and return the resulting [BuildCodeResponse].
+  Future<String> build(String requestId, BuildCodeRequest request) async {
+    // make a GET request to the URL
+    // to check if the file exists and is accessible
+    final getFileResponse = await http.get(Uri.parse(request.sourceFileUrl));
+    if (getFileResponse.statusCode != 200) {
+      _logger.warning({
+        'request_id': requestId,
+        'message': 'Failed to download file',
+        'status_code': getFileResponse.statusCode,
+        'response_body': getFileResponse.body.toString(),
+      });
+
+      throw BadRequest(
+        'Failed to download file: ${getFileResponse.statusCode}',
+      );
+    }
+
+    // generate random string for buildId
+    final buildId = uuid.v1().replaceAll('-', '');
+    _logger.info({
+      'request_id': requestId,
+      'project_id': request.projectId,
+      'page_id': request.pageId,
+      'screen_id': request.screenId,
+      'node_id': request.nodeId,
+      'source_file_url': request.sourceFileUrl,
+      'build_id': buildId,
+      'message': 'Received request to build flutter code to JS',
+    });
+
+    // set request to cache
+    final requestJSON = request.toJson();
+    requestJSON.addEntries([MapEntry('buildId', buildId)]);
+    requestJSON.addEntries([const MapEntry('status', 'processing')]);
+    await _cache.set(
+      _getBuildCacheKey(buildId),
+      jsonEncode(requestJSON),
+      expiration: flutterBuildCacheExpiration,
+    );
+
+    // perform build in background
+    unawaited(_performBuild(requestId, getFileResponse, request, buildId));
+
+    // return buildId to client
+    return buildId;
+  }
+
+  /// Method to perform the actual build
+  Future<void> _performBuild(
+    String requestId,
+    http.Response getFileResponse,
+    BuildCodeRequest request,
+    String buildId,
+  ) async {
+    // Read data from cache
+    var cachedDataStr = await _cache.get(_getBuildCacheKey(buildId));
+    if (cachedDataStr == null) {
+      _logger.warning({
+        'request_id': requestId,
+        'build_id': buildId,
+        'message': 'Cache data not found for buildId',
+      });
+      cachedDataStr = request.toJson().toString();
+    }
+
+    final cachedData = jsonDecode(cachedDataStr) as Map<String, dynamic>;
+    final temp = Directory.systemTemp.createTempSync('dartpad');
+    _logger.info({
+      'request_id': requestId,
+      'build_id': buildId,
+      'path': temp.path,
+      'message': 'Temp directory created',
+    });
+    try {
+      final source = getFileResponse.body;
+      final imports = getAllImportsFor(source);
+      _logger.info({
+        'request_id': requestId,
+        'build_id': buildId,
+        'message': 'Got all imports for source code',
+        'imports': imports.toString(),
+      });
+
+      final usingFlutter = usesFlutterWeb(imports);
+      _logger.info({
+        'request_id': requestId,
+        'build_id': buildId,
+        'message': 'Detected usingFlutter',
+        'using_flutter': usingFlutter,
+      });
+
+      if (usingFlutter) {
+        _copyPath(_projectTemplates.flutterPath, temp.path);
+      } else {
+        _copyPath(_projectTemplates.dartPath, temp.path);
+      }
+
+      Directory(path.join(temp.path, 'lib')).createSync(recursive: true);
+      _logger.info({
+        'request_id': requestId,
+        'build_id': buildId,
+        'message': 'Copied project templates to temp directory',
+        'path': path.join(temp.path, 'lib'),
+      });
+
+      final bootstrapPath = path.join(temp.path, 'lib', kBootstrapDart);
+      _logger.info({
+        'request_id': requestId,
+        'build_id': buildId,
+        'message': 'About to write bootstrap file',
+        'path': bootstrapPath,
+      });
+
+      final bootstrapContents = usingFlutter
+          ? kBootstrapFlutterCode
+          : kBootstrapDartCode;
+      _logger.info({
+        'request_id': requestId,
+        'build_id': buildId,
+        'message': 'Bootstrap contents',
+        'contents': bootstrapContents,
+      });
+
+      File(bootstrapPath).writeAsStringSync(bootstrapContents);
+      File(path.join(temp.path, 'lib', kMainDart)).writeAsStringSync(source);
+      _logger.info({
+        'request_id': requestId,
+        'build_id': buildId,
+        'message': 'Wrote main.dart file',
+        'path': path.join(temp.path, 'lib', kMainDart),
+      });
+
+      final arguments = <String>[
+        '--modules=amd',
+        '--no-summarize',
+        if (usingFlutter) ...[
+          '-s',
+          _projectTemplates.summaryFilePath,
+          '-s',
+          '${_sdk.flutterWebSdkPath}/ddc_outline_sound.dill',
+        ],
+        ...['-o', path.join(temp.path, '$kMainDart.js')],
+        ...['--module-name', 'dartpad_main'],
+        '--enable-asserts',
+        if (_sdk.experiments.isNotEmpty)
+          '--enable-experiment=${_sdk.experiments.join(",")}',
+        bootstrapPath,
+        '--packages=${path.join(temp.path, '.dart_tool', 'package_config.json')}',
+      ];
+
+      final mainJs = File(path.join(temp.path, '$kMainDart.js'));
+      _logger.info({
+        'request_id': requestId,
+        'build_id': buildId,
+        'message': 'About to exec dartdevc worker',
+        'arguments': arguments.join(' '),
+      });
+
+      final response = await _ddcDriver.doWork(
+        WorkRequest(arguments: arguments),
+      );
+
+      if (response.exitCode != 0) {
+        throw Exception(_rewritePaths(response.output));
+      }
+
+      // The `--single-out-file` option for dartdevc was removed in v2.7.0. As
+      // a result, the JS code produced above does *not* provide a name for
+      // the module it contains. That's a problem for DartPad, since it's
+      // adding the code to a script tag in an iframe rather than loading it
+      // as an individual file from baseURL. As a workaround, this replace
+      // statement injects a name into the module definition.
+      final processedJs = mainJs.readAsStringSync().replaceFirst(
+        'define([',
+        "define('dartpad_main', [",
+      );
+
+      // Upload processedJs to GCS with content type 'application/javascript'
+      final media = Media(
+        Stream.fromIterable([processedJs.codeUnits]),
+        processedJs.length,
+        contentType: 'application/javascript',
+      );
+
+      final key = path.joinAll([
+        flutterBuildResultDirectory,
+        request.projectId,
+        request.pageId,
+        request.screenId,
+        request.nodeId ?? '',
+        '$kMainDart.js',
+      ]);
+      await _gcsService.upload(_gcsCDNBucket, media, key);
+      _logger.info({
+        'request_id': requestId,
+        'build_id': buildId,
+        'message': 'Uploaded processed JS to GCS',
+        'key': key,
+      });
+
+      // TODO: Invalidate CDN cache
+      await _gCDNService.invalidateCache('/$key');
+
+      final files = <Map<String, dynamic>>[];
+      files.add(<String, dynamic>{
+        'name': 'main.dart.js',
+        'cdnUrl': '$flutterCDNBaseUrl/$key',
+      });
+
+      // Set build result to cache
+      cachedData['status'] = 'completed';
+      cachedData['files'] = files;
+      await _cache.set(
+        _getBuildCacheKey(buildId),
+        jsonEncode(cachedData),
+        expiration: flutterBuildCacheExpiration,
+      );
+      _logger.info({
+        'request_id': requestId,
+        'build_id': buildId,
+        'message': 'Build process completed',
+      });
+    } catch (e, st) {
+      _logger.warning({
+        'request_id': requestId,
+        'build_id': buildId,
+        'message': 'Build flutter code to JS failed',
+        'error': e.toString(),
+        'stack_trace': st.toString(),
+      });
+
+      // Set failed status and error message to cache
+      cachedData['status'] = 'failed';
+      cachedData['error'] = e.toString();
+      await _cache.set(
+        _getBuildCacheKey(buildId),
+        jsonEncode(cachedData),
+        expiration: flutterBuildCacheExpiration,
+      );
+
+      unawaited(
+        Sentry.captureEvent(
+          SentryEvent(
+            message: const SentryMessage('Build flutter code to JS failed'),
+            tags: {
+              'request_id': requestId,
+              'build_id': buildId,
+              'error': e.toString(),
+              'stack_trace': st.toString(),
+            },
+          ),
+        ),
+      );
+
+      rethrow;
+    } finally {
+      temp.deleteSync(recursive: true);
+      _logger.fine('Temp folder removed: ${temp.path}');
+    }
+  }
+
+  /// Get the status of a build based on the provided buildId.
+  Future<Map<String, dynamic>?> getBuild(String buildId) async {
+    // Retrieve cached data using the buildId
+    final cachedDataStr = await _cache.get(_getBuildCacheKey(buildId));
+    if (cachedDataStr == null) {
+      _logger.warning('Cache data not found for buildId: $buildId');
+      return null;
+    }
+
+    final cachedData = jsonDecode(cachedDataStr) as Map<String, dynamic>;
+    return cachedData;
+  }
+
+  String _getBuildCacheKey(String buildId) {
+    return flutterBuildCacheKeyTemplate.replaceAll('%s', buildId);
+  }
+
   Future<void> dispose() async {
     return _ddcDriver.terminateWorkers();
   }
@@ -296,10 +617,9 @@ class CompilationResults {
   bool get success => problems.isEmpty;
 
   @override
-  String toString() =>
-      success
-          ? 'CompilationResults: Success'
-          : 'Compilation errors: ${problems.join('\n')}';
+  String toString() => success
+      ? 'CompilationResults: Success'
+      : 'Compilation errors: ${problems.join('\n')}';
 }
 
 /// The result of a DDC compile.
@@ -323,10 +643,9 @@ class DDCCompilationResults {
   bool get success => problems.isEmpty;
 
   @override
-  String toString() =>
-      success
-          ? 'CompilationResults: Success'
-          : 'Compilation errors: ${problems.join('\n')}';
+  String toString() => success
+      ? 'CompilationResults: Success'
+      : 'Compilation errors: ${problems.join('\n')}';
 }
 
 /// An issue associated with [CompilationResults].

@@ -1,0 +1,12 @@
+diff -ruN /var/folders/f6/r6gbg5hx79v53gqvb_6j01rw0000gn/T/wakelock_plus/lib/src/wakelock_plus_web_plugin.dart /home/flutter/.pub-cache/hosted/pub.dev/wakelock_plus-1.2.10/lib/src/wakelock_plus_web_plugin.dart
+--- /var/folders/f6/r6gbg5hx79v53gqvb_6j01rw0000gn/T/wakelock_plus/lib/src/wakelock_plus_web_plugin.dart	2025-03-12 11:16:58
++++ /home/flutter/.pub-cache/hosted/pub.dev/wakelock_plus-1.2.10/lib/src/wakelock_plus_web_plugin.dart	2025-03-12 11:17:22
+@@ -17,7 +17,7 @@
+     // Import a version of `NoSleep.js` that was adjusted for the wakelock
+     // plugin.
+     _jsLoaded = importJsLibrary(
+-        url: 'assets/no_sleep.js', flutterPluginName: 'wakelock_plus');
++        url: 'https://static.locofy.ai/libs/flutter/no_sleep.js', flutterPluginName: 'wakelock_plus');
+ 
+     WakelockPlusPlatformInterface.instance = WakelockPlusWebPlugin();
+   }

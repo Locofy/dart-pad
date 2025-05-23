@@ -1,0 +1,11 @@
+name: locofy_formatter
+description: "Format dart code"
+publish_to: "none"
+version: 0.1.0
+
+environment:
+  sdk: ^3.8.0
+
+dependencies:
+  dart_style: ^3.1.0
+  js: ^0.7.1

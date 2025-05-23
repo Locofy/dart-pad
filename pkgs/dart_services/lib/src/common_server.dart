@@ -11,6 +11,7 @@ import 'package:http/http.dart' as http;
 import 'package:logging/logging.dart';
 import 'package:shelf/shelf.dart';
 import 'package:shelf_router/shelf_router.dart';
+import 'package:uuid/uuid.dart';
 
 import 'analysis.dart';
 import 'caching.dart';
@@ -29,7 +30,7 @@ const jsonContentType = 'application/json; charset=utf-8';
 
 const apiPrefix = '/api/<apiVersion>';
 
-const api3 = 'v3';
+const api1 = 'v1';
 
 final log = DartPadLogger('common_server');
 
@@ -55,7 +56,7 @@ class CommonServerImpl {
     analyzer = Analyzer(sdk);
     await analyzer.init();
 
-    compiler = Compiler(sdk, storageBucket: storageBucket);
+    compiler = Compiler(sdk, cache, storageBucket: storageBucket);
   }
 
   Future<void> shutdown() async {
@@ -76,7 +77,9 @@ class CommonServerApi {
   late final Router router = () {
     final router = Router();
 
-    // general requests (GET)
+    router.get(r'/', handlePing);
+    router.get(r'/ping', handlePing);
+
     router.get(r'/api/<apiVersion>/version', handleVersion);
 
     // general requests (POST)
@@ -88,6 +91,8 @@ class CommonServerApi {
       r'/api/<apiVersion>/compileNewDDCReload',
       handleCompileNewDDCReload,
     );
+    router.post(r'/api/<apiVersion>/build', build);
+    router.get(r'/api/<apiVersion>/build/<buildId>', getBuild);
     router.post(r'/api/<apiVersion>/complete', handleComplete);
     router.post(r'/api/<apiVersion>/fixes', handleFixes);
     router.post(r'/api/<apiVersion>/format', handleFormat);
@@ -109,14 +114,30 @@ class CommonServerApi {
 
   Future<void> shutdown() => impl.shutdown();
 
+  Future<Response> handlePing(Request request) async {
+    return ok({
+      'health': 'ok',
+      'environment': Platform.environment['ENVIRONMENT'] ?? 'development',
+      'commit_hash': Platform.environment['COMMIT_HASH'] ?? 'unknown',
+      'version': version().toJson()
+    });
+  }
+
   Future<Response> handleVersion(Request request, String apiVersion) async {
-    if (apiVersion != api3) return unhandledVersion(apiVersion);
+    if (apiVersion != api1) return unhandledVersion(apiVersion);
 
     return ok(version().toJson());
   }
 
   Future<Response> handleAnalyze(Request request, String apiVersion) async {
-    if (apiVersion != api3) return unhandledVersion(apiVersion);
+    if (apiVersion != api1) return unhandledVersion(apiVersion);
+
+    final apiKey = request.headers.containsKey('x-api-key')
+        ? request.headers['x-api-key']
+        : null;
+    if (apiKey == null || apiKey != Platform.environment['API_KEY']) {
+      return Response.forbidden('Invalid API key');
+    }
 
     final sourceRequest = api.SourceRequest.fromJson(
       await request.readAsJson(),
@@ -130,7 +151,7 @@ class CommonServerApi {
   }
 
   Future<Response> handleCompile(Request request, String apiVersion) async {
-    if (apiVersion != api3) return unhandledVersion(apiVersion);
+    if (apiVersion != api1) return unhandledVersion(apiVersion);
     final ctx = DartPadRequestContext.fromRequest(request);
 
     final sourceRequest = api.SourceRequest.fromJson(
@@ -153,7 +174,14 @@ class CommonServerApi {
     String apiVersion,
     Future<DDCCompilationResults> Function(api.CompileRequest) compile,
   ) async {
-    if (apiVersion != api3) return unhandledVersion(apiVersion);
+    if (apiVersion != api1) return unhandledVersion(apiVersion);
+
+    final apiKey = request.headers.containsKey('x-api-key')
+        ? request.headers['x-api-key']
+        : null;
+    if (apiKey == null || apiKey != Platform.environment['API_KEY']) {
+      return Response.forbidden('Invalid API key');
+    }
 
     final compileRequest = api.CompileRequest.fromJson(
       await request.readAsJson(),
@@ -178,6 +206,36 @@ class CommonServerApi {
     } else {
       return failure(results.problems.map((p) => p.message).join('\n'));
     }
+  }
+
+  Future<Response> build(Request request, String apiVersion) async {
+    if (apiVersion != api1) return unhandledVersion(apiVersion);
+
+    final apiKey = request.headers.containsKey('x-api-key')
+        ? request.headers['x-api-key']
+        : null;
+    if (apiKey != null && apiKey != Platform.environment['API_KEY']) {
+      return Response.forbidden('Invalid API key');
+    }
+
+    final buildCodeRequest =
+    api.BuildCodeRequest.fromJson(await request.readAsJson());
+
+    final buildId = await impl.compiler.build(getRequestID(request), buildCodeRequest);
+    return ok(api.BuildCodeResponse(
+      buildId: buildId,
+    ).toJson());
+  }
+
+  Future<Response> getBuild(Request request, String apiVersion, String buildId) async {
+    if (apiVersion != api1) return unhandledVersion(apiVersion);
+
+    final buildResult = await impl.compiler.getBuild(buildId);
+    if (buildResult == null) {
+      return notFound('build with id $buildId was not found');
+    }
+
+    return ok(buildResult);
   }
 
   Future<Response> handleCompileDDC(Request request, String apiVersion) async {
@@ -222,7 +280,7 @@ class CommonServerApi {
   }
 
   Future<Response> handleComplete(Request request, String apiVersion) async {
-    if (apiVersion != api3) return unhandledVersion(apiVersion);
+    if (apiVersion != api1) return unhandledVersion(apiVersion);
 
     final sourceRequest = api.SourceRequest.fromJson(
       await request.readAsJson(),
@@ -236,7 +294,7 @@ class CommonServerApi {
   }
 
   Future<Response> handleFixes(Request request, String apiVersion) async {
-    if (apiVersion != api3) return unhandledVersion(apiVersion);
+    if (apiVersion != api1) return unhandledVersion(apiVersion);
 
     final sourceRequest = api.SourceRequest.fromJson(
       await request.readAsJson(),
@@ -250,7 +308,7 @@ class CommonServerApi {
   }
 
   Future<Response> handleFormat(Request request, String apiVersion) async {
-    if (apiVersion != api3) return unhandledVersion(apiVersion);
+    if (apiVersion != api1) return unhandledVersion(apiVersion);
     final ctx = DartPadRequestContext.fromRequest(request);
 
     final sourceRequest = api.SourceRequest.fromJson(
@@ -269,7 +327,7 @@ class CommonServerApi {
   }
 
   Future<Response> handleDocument(Request request, String apiVersion) async {
-    if (apiVersion != api3) return unhandledVersion(apiVersion);
+    if (apiVersion != api1) return unhandledVersion(apiVersion);
 
     final sourceRequest = api.SourceRequest.fromJson(
       await request.readAsJson(),
@@ -322,7 +380,7 @@ class CommonServerApi {
   }
 
   Future<Response> suggestFix(Request request, String apiVersion) async {
-    if (apiVersion != api3) return unhandledVersion(apiVersion);
+    if (apiVersion != api1) return unhandledVersion(apiVersion);
 
     final suggestFixRequest = api.SuggestFixRequest.fromJson(
       await request.readAsJson(),
@@ -341,7 +399,7 @@ class CommonServerApi {
   }
 
   Future<Response> generateCode(Request request, String apiVersion) async {
-    if (apiVersion != api3) return unhandledVersion(apiVersion);
+    if (apiVersion != api1) return unhandledVersion(apiVersion);
 
     final generateCodeRequest = api.GenerateCodeRequest.fromJson(
       await request.readAsJson(),
@@ -360,7 +418,7 @@ class CommonServerApi {
   Future<Response> generateUi(Request request, String apiVersion) async {
     final ctx = DartPadRequestContext.fromRequest(request);
 
-    if (apiVersion != api3) return unhandledVersion(apiVersion);
+    if (apiVersion != api1) return unhandledVersion(apiVersion);
 
     final generateUiRequest = api.GenerateUiRequest.fromJson(
       await request.readAsJson(),
@@ -384,7 +442,7 @@ class CommonServerApi {
   }
 
   Future<Response> updateCode(Request request, String apiVersion) async {
-    if (apiVersion != api3) return unhandledVersion(apiVersion);
+    if (apiVersion != api1) return unhandledVersion(apiVersion);
 
     final updateCodeRequest = api.UpdateCodeRequest.fromJson(
       await request.readAsJson(),
@@ -439,7 +497,17 @@ class CommonServerApi {
 
   Response ok(Map<String, dynamic> json) {
     return Response.ok(
-      _jsonEncoder.convert(json),
+      _jsonEncoder.convert({
+        'data': json,
+      }),
+      encoding: utf8,
+      headers: _jsonHeaders,
+    );
+  }
+
+  Response notFound(String message) {
+    return Response.notFound(
+      _jsonEncoder.convert({'message': message}),
       encoding: utf8,
       headers: _jsonHeaders,
     );
@@ -574,4 +642,8 @@ String _formatMessage(
   }
 
   return message;
+}
+
+String getRequestID(Request request) {
+  return request.headers['x-request-id'] ?? const Uuid().v1().replaceAll('-', '');
 }
